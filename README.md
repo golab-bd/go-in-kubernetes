@@ -1,52 +1,86 @@
 # Go in Kubernetes
 Single node cluster orchestration for go application with minimum effort
 
-## Kubernetes Installation
+
+## Getting Started
+These instructions will get you a copy of the project up and running on your local machine for development and testing purposes. See deployment for notes on how to deploy the project on a live system.
+
+### Prerequisites
+1. Docker
+2. Kubernetes
+
+### Docker Installation
+[Docker CE](https://docs.docker.com/install/)
+
+### Kubernetes Installation
 Installion instruction for 
 [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl/) and 
 [minikube](https://kubernetes.io/docs/tasks/tools/install-minikube/)
 
-Start minikube:
+### Launching Kubernetes Cluster
+We are using Single Node Kubernetes Cluster - `minikube`. For starting `minikube`.
 ```
 minikube start
 ```
 
-To install and run Kubernetes on Mac follow [this](https://rominirani.com/tutorial-getting-started-with-kubernetes-with-docker-on-mac-7f58467203fd)
 
-## Docker Image
-[Dockerfile](https://github.com/shoeb240/go-in-kubernetes/blob/master/Dockerfile)
-```dockerfile
-apiVersion: extensions/v1beta1
-kind: Deployment
-metadata:
-  name: go-app
-  labels:
-        app: go-app
+### Installation
 
-spec:
-  replicas: 3
-  template:
-    metadata:
-      labels:
-        app: go-app
 
-    spec:
-      containers:
-      - image: go-built-app:1.0
-        name: go-built-app
-        volumeMounts:
-          - name: my-host-path
-            mountPath: /go/src
+#### Docker Image
 
-      volumes:
-      - name: my-host-path
-        hostPath:
-          path: /Users/shoeb240/go/src/github.com/shoeb240/go-in-kubernetes
-          type: Directory
+``` dockerfile
+# Accept the Go version for the image to be set as a build argument.
+# Default to Go 1.11
+ARG GO_VERSION=1.11
+
+
+# First stage: build the executable.
+FROM golang:${GO_VERSION}-alpine AS builder
+
+
+# Git is required for fetching the dependencies.
+RUN apk add --no-cache ca-certificates git
+
+# Set the working directory outside $GOPATH to enable the support for modules.
+WORKDIR /src/github.com/shoeb240/go-in-kubernetes
+
+# Fetch dependencies first; they are less susceptible to change on every build
+# and will therefore be cached for speeding up the next build
+COPY ./go.mod ./go.sum ./
+RUN go mod download
+
+# Import the code from the context.
+COPY ./ ./
+
+# Build the executable to `/app`. Mark the build as statically linked.
+RUN CGO_ENABLED=0 go build \
+-installsuffix 'static' \
+-o /app cmd/api/main.go
+
+# Final stage: the running container.
+FROM scratch AS final
+
+# Import the compiled executable from the first stage.
+COPY --from=builder /app /app
+# Import the root ca-certificates (required for Let's Encrypt)
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
+# Expose both 443 and 80 to our application
+EXPOSE 443
+EXPOSE 80
+
+# Mount the certificate cache directory as a volume, so it remains even after
+# we deploy a new version
+VOLUME ["/cert-cache"]
+
+# Run the compiled binary.
+ENTRYPOINT ["/app"]
+
 ```
 
-Create docker image from Dockerfile
-```text
+* Create docker image from Dockerfile
+```shell
 $ docker build -t go-built-app:1.0 .
 Sending build context to Docker daemon  60.93kB
 Step 1/11 : FROM golang:alpine AS builder
@@ -105,20 +139,26 @@ Successfully built 2a34bf9f52fe
 Successfully tagged go-built-app:1.0
 ```
 
-Check created docker images:
+* Check created docker images:
 ```text
-Shoeb-Mac:go-in-kubernetes shoeb240$ docker images
+$ docker images
 REPOSITORY                                 TAG                 IMAGE ID            CREATED             SIZE
 go-built-app                               1.0                 2a34bf9f52fe        2 minutes ago       11.3MB
 ```
 
-## Deployment
+* Run Docker Image as a container 
+
+``` text
+docker run -p <host_port>/8081 go-built-app # If necessary Remove the container before moving on... 
+```
+
+#### Kubernetes Deployment
+
 One of the most common Kubernetes object is the deployment object. The deployment object defines the container spec required, along with the name and labels used by other parts of Kubernetes to discover and connect to the application.
 
 We will create container using image go-built-app in 3 pods.
 
-[deployment.yaml](https://github.com/shoeb240/go-in-kubernetes/blob/master/deployment.yaml)
-```
+```yaml
 apiVersion: extensions/v1beta1
 kind: Deployment
 metadata:
@@ -144,18 +184,20 @@ spec:
       volumes:
       - name: my-host-path
         hostPath:
-          path: /Users/shoeb240/go/src/github.com/shoeb240/go-in-kubernetes
+          path: $GOPATH/github.com/shoeb240/go-in-kubernetes # please change it as your is going to be not the same as mine
           type: Directory
 ```
-*Note: You must change spec.template.spec.volumes.hostPath.path according to your codebase absolute path.
 
-Run kubectl command:
+
+*Note*: You must change spec.template.spec.volumes.hostPath.path according to your codebase absolute path.
+
+* Run kubectl command:
 ```
-$ kubectl create -f deployment.yaml
+$ kubectl create -f k8s/deployment.yaml
 deployment.extensions/go-app created
 ```
 
-Checking deployment and service
+* Checking deployment and service
 ```
 $ kubectl get deployments
 NAME     DESIRED   CURRENT   UP-TO-DATE   AVAILABLE   AGE
@@ -170,11 +212,10 @@ Shoeb-Mac:go-in-kubernetes shoeb240$
 
 We cannot yet access the app because port is not exposed outside world. We need to create service object for that.
 
-## Service
+#### K8s Service
 Kubernetes has powerful networking capabilities that control how applications communicate. Service is assigned a unique IP address (also called clusterIP). 
 
-[service.yaml](https://github.com/shoeb240/go-in-kubernetes/blob/master/service.yaml)
-```
+```yaml
 apiVersion: v1
 kind: Service
 metadata:
@@ -190,16 +231,16 @@ spec:
     app: go-app
 ```
 
-Run kubectl command:
-```
-$ kubectl create -f service.yaml
+* Run kubectl command:
+```shell
+$ kubectl create -f k8s/service.yaml
 service/go-app-service created
 ```
 
 The Service selects all applications with the label go-app. As multiple replicas are deployed, they will be automatically load balanced based on this common label. The Service makes the application available via a NodePort.
 
-Checking services
-```
+* Checking services
+```shell
 $ kubectl get service
 NAME             TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)          AGE
 go-app-service   NodePort    10.109.45.113   <none>        8081:30081/TCP   7s
@@ -207,22 +248,22 @@ kubernetes       ClusterIP   10.96.0.1       <none>        443/TCP          10d
 ```
 
 
-Now we should be able to curl the go Service on <CLUSTER-IP>:<PORT>
-```
+Now we should be able to curl the go Service on `<CLUSTER-IP>:<PORT>`
+```shell
 $ curl localhost:30081/users
   I am responding to your API call
 ```
 
 
-## Scalling
-We can scale up to 4 replicas from 3 modifying deployment.yaml replicas field as "replicas: 4" and running the following kubectl command
-```
-$ kubectl apply -f deployment.yaml
+#### K8s Scalling
+We can scale up to 4 replicas from 3 modifying `deployment.yaml` replicas field as `"replicas: 4"` and running the following `kubectl` command
+```shell
+$ kubectl apply -f k8s/deployment.yaml
 deployment.extensions/go-app configured
 ```
 
-Lets check deployment and pods
-```
+* Lets check deployment and pods
+```shell
 $ kubectl get deployments
 NAME     DESIRED   CURRENT   UP-TO-DATE   AVAILABLE   AGE
 go-app   4         4         4            4           25m
@@ -235,24 +276,24 @@ go-app-5f55f4c977-sprfb   1/1     Running   0          25m
 ```
 
 
-## Troubleshooting
-Lets see how to find out problem when our deployment is not successful. For instance, we can put wrong image version in deployment.yaml. Our image version is 1.0, we can change it to 1.1 and create deployment again. Donot forget to delete previous deployment.
+### Troubleshooting
+Lets see how to find out problem when our deployment is not successful. For instance, we can put wrong image version in `deployment.yaml`. Our image version is `1.0`, we can change it to `1.1` and create deployment again. Donot forget to delete previous deployment.
 
-```
-$ kubectl delete -f deployment.yaml
+```shell
+$ kubectl delete -f k8s/deployment.yaml
 deployment.extensions "go-app" deleted
-$ kubectl create -f deployment.yaml
+$ kubectl create -f k8s/deployment.yaml
 deployment.extensions/go-app created
 ```
 
-Checking deployment. We see that available deployment is 0.
+* Checking deployment. We see that available deployment is 0.
 ```
 $ kubectl get deployments
 NAME     DESIRED   CURRENT   UP-TO-DATE   AVAILABLE   AGE
 go-app   4         4         4            0           13s
 ```
 
-Checking pods, they are not ready and status shows ErrImagePull and ImagePullBackOff. So we realize that we have issue with image.
+* Checking pods, they are not ready and status shows ErrImagePull and ImagePullBackOff. So we realize that we have issue with image.
 ```
 $ kubectl get pods
 NAME                      READY   STATUS             RESTARTS   AGE
@@ -262,7 +303,7 @@ go-app-56577bc9d4-lb9c7   0/1     ErrImagePull       0          21s
 go-app-56577bc9d4-r5274   0/1     ErrImagePull       0          21s
 ```
 
-To get more insight, we write command to describe pod
+* To get more insight, we write command to describe pod
 ```
 $ kubectl describe pod go-app-56577bc9d4-8gmhc
 Name:           go-app-56577bc9d4-8gmhc
@@ -322,3 +363,4 @@ Events:
 ```
 
 At the bottom of the output we see - Failed to pull image "go-built-app:1.1"
+
